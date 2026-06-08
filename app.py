@@ -12,19 +12,33 @@ CORS(app)
 
 def get_db():
     return mysql.connector.connect(
-        host=os.getenv("DB_HOST"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        database=os.getenv("DB_NAME")
+        host=os.getenv("DB_HOST", "localhost"),
+        user=os.getenv("DB_USER", "root"),
+        password=os.getenv("DB_PASSWORD", ""),
+        database=os.getenv("DB_NAME", "job_tracker"),
+        port=int(os.getenv("DB_PORT", 3306))
     )
 
-# Scraper endpoint (n8n ব্যবহার করে)
 @app.route('/scrape', methods=['GET'])
 def get_jobs():
     jobs = scrape_remoteok()
+    if jobs:
+        try:
+            conn = get_db()
+            cursor = conn.cursor()
+            for job in jobs:
+                cursor.execute("""
+                    INSERT INTO jobs (title, company, url, location, source)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE title=VALUES(title)
+                """, (job['title'], job['company'], job['url'], job['location'], job['source']))
+            conn.commit()
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            print(f"DB Error: {e}")
     return jsonify(jobs)
 
-# Dashboard এর জন্য নতুন endpoint
 @app.route('/api/jobs', methods=['GET'])
 def api_jobs():
     conn = get_db()
