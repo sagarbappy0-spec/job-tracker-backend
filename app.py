@@ -6,7 +6,7 @@ import mysql.connector
 import os
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins="*", supports_credentials=True)
 bcrypt = Bcrypt(app)
 app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "supersecretkey")
 jwt = JWTManager(app)
