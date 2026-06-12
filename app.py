@@ -67,6 +67,13 @@ def login():
         if cursor: cursor.close()
         if conn: conn.close()
 
+@app.route('/scrape')
+def run_scrape():
+    from scraper import scrape_all, save_jobs
+    jobs = scrape_all()
+    save_jobs(jobs)
+    return jsonify({"message": f"Done! {len(jobs)} jobs scraped."})
+
 @app.route('/jobs', methods=['GET'])
 @jwt_required()
 def get_jobs():
@@ -75,10 +82,8 @@ def get_jobs():
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
-        # 30 দিনের পুরনো jobs delete করো
         cursor.execute("DELETE FROM jobs WHERE created_at < NOW() - INTERVAL 30 DAY")
         conn.commit()
-        # বাকি jobs দেখাও
         cursor.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 50")
         jobs = cursor.fetchall()
         return jsonify(jobs), 200
