@@ -67,26 +67,6 @@ def login():
         if cursor: cursor.close()
         if conn: conn.close()
 
-@app.route('/setup-db')
-def setup_db():
-    conn = None
-    cursor = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("""
-            ALTER TABLE jobs 
-            ADD COLUMN created_at 
-            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        """)
-        conn.commit()
-        return jsonify({"message": "created_at column added!"}), 200
-    except Exception as e:
-        return jsonify({"message": str(e)}), 500
-    finally:
-        if cursor: cursor.close()
-        if conn: conn.close()
-
 @app.route('/jobs', methods=['GET'])
 @jwt_required()
 def get_jobs():
@@ -95,6 +75,10 @@ def get_jobs():
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
+        # 30 দিনের পুরনো jobs delete করো
+        cursor.execute("DELETE FROM jobs WHERE created_at < NOW() - INTERVAL 30 DAY")
+        conn.commit()
+        # বাকি jobs দেখাও
         cursor.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 50")
         jobs = cursor.fetchall()
         return jsonify(jobs), 200
