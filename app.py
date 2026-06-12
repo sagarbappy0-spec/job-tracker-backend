@@ -1,95 +1,78 @@
-from flask import Flask, jsonify, request
+from flask import Flask, request, jsonify
 from flask_cors import CORS
-from scraper import scrape_remoteok
+from flask_bcrypt import Bcrypt
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required
 import mysql.connector
-import os, bcrypt, jwt, datetime
-from dotenv import load_dotenv
-
-load_dotenv()
+import os
 
 app = Flask(__name__)
 CORS(app)
-SECRET_KEY = "jobtracker_secret_2024"
+bcrypt = Bcrypt(app)
+app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "supersecretkey")
+jwt = JWTManager(app)
 
 def get_db():
     return mysql.connector.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        user=os.getenv("DB_USER", "root"),
-        password=os.getenv("DB_PASSWORD", ""),
-        database=os.getenv("DB_NAME", "job_tracker"),
-        port=int(os.getenv("DB_PORT", 3306))
+        host=os.environ.get("MYSQLHOST"),
+        user=os.environ.get("MYSQLUSER"),
+        password=os.environ.get("MYSQLPASSWORD"),
+        database=os.environ.get("MYSQLDB"),
+        port=int(os.environ.get("MYSQLPORT", 3306))
     )
 
-# Jobs scrape
-@app.route('/scrape', methods=['GET'])
-def get_jobs():
-    jobs = scrape_remoteok()
-    return jsonify(jobs)
+@app.route('/')
+def home():
+    return jsonify({"status": "Backend is running!"})
 
-# Jobs list
-@app.route('/api/jobs', methods=['GET'])
-def api_jobs():
-    conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM jobs ORDER BY id DESC")
-    jobs = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return jsonify(jobs)
-
-# Register
-@app.route('/api/register', methods=['POST'])
+@app.route('/register', methods=['POST'])
 def register():
     data = request.json
-    name = data.get('name')
-    email = data.get('email')
-    password = data.get('password')
-    
-    if not name or not email or not password:
-        return jsonify({"error": "সব field পূরণ করো"}), 400
-    
-    hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
-    
+    hashed_pw = bcrypt.generate_password_hash(data['password']).decode('utf-8')
     try:
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO users (name, email, password) VALUES (%s, %s, %s)",
-            (name, email, hashed.decode('utf-8'))
+            "INSERT INTO users (username, email, password) VALUES (%s, %s, %s)",
+            (data['username'], data['email'], hashed_pw)
         )
         conn.commit()
+        return jsonify({"message": "User registered successfully"}), 201
+    except Exception as e:
+        return jsonify({"message": "User already exists"}), 400
+    finally:
         cursor.close()
         conn.close()
-        return jsonify({"message": "Registration সফল!"}), 201
-    except Exception as e:
-        return jsonify({"error": "Email already exists"}), 400
 
-# Login
-@app.route('/api/login', methods=['POST'])
+@app.route('/login', methods=['POST'])
 def login():
     data = request.json
-    email = data.get('email')
-    password = data.get('password')
-    
-    conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
-    user = cursor.fetchone()
-    cursor.close()
-    conn.close()
-    
-    if not user:
-        return jsonify({"error": "Email পাওয়া যায়নি"}), 401
-    
-    if bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')):
-        token = jwt.encode({
-            'user_id': user['id'],
-            'name': user['name'],
-            'exp': datetime.datetime.utcnow() + datetime.timedelta(days=7)
-        }, SECRET_KEY, algorithm='HS256')
-        return jsonify({"token": token, "name": user['name']}), 200
-    else:
-        return jsonify({"error": "Password ভুল"}), 401
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM users WHERE email = %s", (data['email'],))
+        user = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if user and bcrypt.check_password_hash(user['password'], data['password']):
+            token = create_access_token(identity=str(user['id']))
+            return jsonify({"token": token}), 200
+        return jsonify({"message": "Invalid credentials"}), 401
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+
+@app.route('/jobs', methods=['GET'])
+@jwt_required()
+def get_jobs():
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 50")
+        jobs = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return jsonify(jobs), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000)
