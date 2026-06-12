@@ -67,6 +67,26 @@ def login():
         if cursor: cursor.close()
         if conn: conn.close()
 
+@app.route('/setup-db')
+def setup_db():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("""
+            ALTER TABLE jobs 
+            ADD COLUMN IF NOT EXISTS created_at 
+            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        """)
+        conn.commit()
+        return jsonify({"message": "created_at column added!"}), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
 @app.route('/jobs', methods=['GET'])
 @jwt_required()
 def get_jobs():
