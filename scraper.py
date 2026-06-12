@@ -122,32 +122,33 @@ def scrape_jobicy():
 
 def save_jobs(jobs):
     conn = None
-    cursor = None
     saved = 0
     skipped = 0
     try:
         conn = get_db()
-        cursor = conn.cursor()
         for job in jobs:
+            cursor = conn.cursor()
             cursor.execute(
                 "SELECT id FROM jobs WHERE title = %s AND company = %s",
                 (job["title"], job["company"])
             )
             existing = cursor.fetchone()
+            cursor.close()
             if existing:
                 skipped += 1
                 continue
-            cursor.execute(
+            cursor2 = conn.cursor()
+            cursor2.execute(
                 "INSERT INTO jobs (title, company, url, location, source) VALUES (%s, %s, %s, %s, %s)",
                 (job["title"], job["company"], job["url"], job["location"], job["source"])
             )
+            cursor2.close()
             saved += 1
         conn.commit()
         print(f"Saved: {saved}, Skipped (duplicate): {skipped}")
     except Exception as e:
         print(f"DB Error: {e}")
     finally:
-        if cursor: cursor.close()
         if conn: conn.close()
 
 def scrape_all():
