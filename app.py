@@ -76,7 +76,7 @@ def setup_db():
         cursor = conn.cursor()
         cursor.execute("""
             ALTER TABLE jobs 
-            ADD COLUMN IF NOT EXISTS created_at 
+            ADD COLUMN created_at 
             TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         """)
         conn.commit()
