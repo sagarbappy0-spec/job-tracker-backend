@@ -27,8 +27,10 @@ def home():
 @app.route('/register', methods=['POST'])
 def register():
     data = request.json
-    hashed_pw = bcrypt.generate_password_hash(data['password']).decode('utf-8')
+    conn = None
+    cursor = None
     try:
+        hashed_pw = bcrypt.generate_password_hash(data['password']).decode('utf-8')
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute(
@@ -40,12 +42,14 @@ def register():
     except Exception as e:
         return jsonify({"message": "User already exists"}), 400
     finally:
-        cursor.close()
-        conn.close()
+        if cursor: cursor.close()
+        if conn: conn.close()
 
 @app.route('/login', methods=['POST'])
 def login():
     data = request.json
+    conn = None
+    cursor = None
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
@@ -59,20 +63,26 @@ def login():
         return jsonify({"message": "Invalid credentials"}), 401
     except Exception as e:
         return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
 
 @app.route('/jobs', methods=['GET'])
 @jwt_required()
 def get_jobs():
+    conn = None
+    cursor = None
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 50")
         jobs = cursor.fetchall()
-        cursor.close()
-        conn.close()
         return jsonify(jobs), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
