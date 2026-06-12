@@ -13,11 +13,11 @@ jwt = JWTManager(app)
 
 def get_db():
     return mysql.connector.connect(
-        host=os.environ.get("MYSQLHOST"),
-        user=os.environ.get("MYSQLUSER"),
-        password=os.environ.get("MYSQLPASSWORD"),
-        database=os.environ.get("MYSQLDB"),
-        port=int(os.environ.get("MYSQLPORT", 3306))
+        host=os.environ.get("DB_HOST") or os.environ.get("MYSQLHOST"),
+        user=os.environ.get("DB_USER") or os.environ.get("MYSQLUSER"),
+        password=os.environ.get("DB_PASSWORD") or os.environ.get("MYSQLPASSWORD"),
+        database=os.environ.get("DB_NAME") or os.environ.get("MYSQLDB"),
+        port=int(os.environ.get("DB_PORT") or os.environ.get("MYSQLPORT") or 3306)
     )
 
 @app.route('/')
