@@ -84,7 +84,7 @@ def get_jobs():
         cursor = conn.cursor(dictionary=True)
         cursor.execute("DELETE FROM jobs WHERE created_at < NOW() - INTERVAL 30 DAY")
         conn.commit()
-        cursor.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 50")
+        cursor.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 200")
         jobs = cursor.fetchall()
         return jsonify(jobs), 200
     except Exception as e:
