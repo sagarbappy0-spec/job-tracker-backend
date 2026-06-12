@@ -1,6 +1,7 @@
 import requests
 import mysql.connector
 import os
+import xml.etree.ElementTree as ET
 
 def get_db():
     return mysql.connector.connect(
@@ -14,7 +15,7 @@ def get_db():
 def scrape_remotive():
     jobs = []
     try:
-        response = requests.get("https://remotive.com/api/remote-jobs?limit=20", timeout=15)
+        response = requests.get("https://remotive.com/api/remote-jobs?limit=30", timeout=15)
         data = response.json()
         for job in data.get("jobs", []):
             jobs.append({
@@ -33,7 +34,7 @@ def scrape_arbeitnow():
     try:
         response = requests.get("https://www.arbeitnow.com/api/job-board-api", timeout=15)
         data = response.json()
-        for job in data.get("data", [])[:20]:
+        for job in data.get("data", [])[:30]:
             jobs.append({
                 "title": job.get("title", "N/A"),
                 "company": job.get("company_name", "N/A"),
@@ -45,6 +46,80 @@ def scrape_arbeitnow():
         print(f"Arbeitnow Error: {e}")
     return jobs
 
+def scrape_remoteok():
+    jobs = []
+    try:
+        response = requests.get(
+            "https://remoteok.com/api",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15
+        )
+        data = response.json()
+        for job in data[1:31]:
+            if isinstance(job, dict) and job.get("position"):
+                jobs.append({
+                    "title": job.get("position", "N/A"),
+                    "company": job.get("company", "N/A"),
+                    "url": job.get("url", "N/A"),
+                    "location": "Remote",
+                    "source": "RemoteOK"
+                })
+    except Exception as e:
+        print(f"RemoteOK Error: {e}")
+    return jobs
+
+def scrape_weworkremotely():
+    jobs = []
+    try:
+        response = requests.get(
+            "https://weworkremotely.com/remote-jobs.rss",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15
+        )
+        root = ET.fromstring(response.content)
+        count = 0
+        for item in root.findall(".//item"):
+            if count >= 30:
+                break
+            title = item.find("title")
+            link = item.find("link")
+            if title is not None and link is not None:
+                title_text = title.text or "N/A"
+                parts = title_text.split(":")
+                job_title = parts[1].strip() if len(parts) > 1 else title_text
+                company = parts[0].strip() if len(parts) > 1 else "N/A"
+                jobs.append({
+                    "title": job_title,
+                    "company": company,
+                    "url": link.text or "N/A",
+                    "location": "Remote",
+                    "source": "WeWorkRemotely"
+                })
+                count += 1
+    except Exception as e:
+        print(f"WeWorkRemotely Error: {e}")
+    return jobs
+
+def scrape_jobicy():
+    jobs = []
+    try:
+        response = requests.get(
+            "https://jobicy.com/api/v2/remote-jobs?count=30",
+            timeout=15
+        )
+        data = response.json()
+        for job in data.get("jobs", []):
+            jobs.append({
+                "title": job.get("jobTitle", "N/A"),
+                "company": job.get("companyName", "N/A"),
+                "url": job.get("url", "N/A"),
+                "location": job.get("jobGeo", "Remote"),
+                "source": "Jobicy"
+            })
+    except Exception as e:
+        print(f"Jobicy Error: {e}")
+    return jobs
+
 def save_jobs(jobs):
     conn = None
     cursor = None
@@ -54,7 +129,6 @@ def save_jobs(jobs):
         conn = get_db()
         cursor = conn.cursor()
         for job in jobs:
-            # Deduplication check — same title + company আগে আছে কিনা
             cursor.execute(
                 "SELECT id FROM jobs WHERE title = %s AND company = %s",
                 (job["title"], job["company"])
@@ -63,7 +137,6 @@ def save_jobs(jobs):
             if existing:
                 skipped += 1
                 continue
-            # Duplicate নেই — insert করো
             cursor.execute(
                 "INSERT INTO jobs (title, company, url, location, source) VALUES (%s, %s, %s, %s, %s)",
                 (job["title"], job["company"], job["url"], job["location"], job["source"])
@@ -81,6 +154,9 @@ def scrape_all():
     jobs = []
     jobs += scrape_remotive()
     jobs += scrape_arbeitnow()
+    jobs += scrape_remoteok()
+    jobs += scrape_weworkremotely()
+    jobs += scrape_jobicy()
     print(f"Total scraped: {len(jobs)}")
     return jobs
 
