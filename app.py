@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_bcrypt import Bcrypt
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 import mysql.connector
 import os
 
@@ -85,6 +85,95 @@ def get_jobs():
         cursor.execute("DELETE FROM jobs WHERE created_at < NOW() - INTERVAL 30 DAY")
         conn.commit()
         cursor.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 200")
+        jobs = cursor.fetchall()
+        return jsonify(jobs), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/setup-saved-jobs')
+def setup_saved_jobs():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS saved_jobs (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                job_id INT NOT NULL,
+                saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_save (user_id, job_id)
+            )
+        """)
+        conn.commit()
+        return jsonify({"message": "saved_jobs table created!"}), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/save-job/<int:job_id>', methods=['POST'])
+@jwt_required()
+def save_job(job_id):
+    user_id = get_jwt_identity()
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO saved_jobs (user_id, job_id) VALUES (%s, %s)",
+            (user_id, job_id)
+        )
+        conn.commit()
+        return jsonify({"message": "Job saved!"}), 201
+    except Exception as e:
+        return jsonify({"message": "Already saved!"}), 400
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/unsave-job/<int:job_id>', methods=['DELETE'])
+@jwt_required()
+def unsave_job(job_id):
+    user_id = get_jwt_identity()
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM saved_jobs WHERE user_id = %s AND job_id = %s",
+            (user_id, job_id)
+        )
+        conn.commit()
+        return jsonify({"message": "Job unsaved!"}), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/saved-jobs', methods=['GET'])
+@jwt_required()
+def get_saved_jobs():
+    user_id = get_jwt_identity()
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT j.* FROM jobs j
+            INNER JOIN saved_jobs sj ON j.id = sj.job_id
+            WHERE sj.user_id = %s
+            ORDER BY sj.saved_at DESC
+        """, (user_id,))
         jobs = cursor.fetchall()
         return jsonify(jobs), 200
     except Exception as e:
