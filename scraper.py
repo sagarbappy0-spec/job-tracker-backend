@@ -128,7 +128,7 @@ def save_jobs(jobs):
         conn = get_db()
         for job in jobs:
             try:
-                cursor = conn.cursor()
+                cursor = conn.cursor(buffered=True)
                 cursor.execute(
                     "SELECT id FROM jobs WHERE title = %s AND company = %s",
                     (job["title"], job["company"])
@@ -138,7 +138,7 @@ def save_jobs(jobs):
                 if existing:
                     skipped += 1
                     continue
-                cursor2 = conn.cursor()
+                cursor2 = conn.cursor(buffered=True)
                 cursor2.execute(
                     "INSERT INTO jobs (title, company, url, location, source) VALUES (%s, %s, %s, %s, %s)",
                     (job["title"], job["company"], job["url"], job["location"], job["source"])
