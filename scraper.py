@@ -127,27 +127,33 @@ def save_jobs(jobs):
     try:
         conn = get_db()
         for job in jobs:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT id FROM jobs WHERE title = %s AND company = %s",
-                (job["title"], job["company"])
-            )
-            existing = cursor.fetchone()
-            cursor.close()
-            if existing:
-                skipped += 1
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id FROM jobs WHERE title = %s AND company = %s",
+                    (job["title"], job["company"])
+                )
+                existing = cursor.fetchone()
+                cursor.close()
+                if existing:
+                    skipped += 1
+                    continue
+                cursor2 = conn.cursor()
+                cursor2.execute(
+                    "INSERT INTO jobs (title, company, url, location, source) VALUES (%s, %s, %s, %s, %s)",
+                    (job["title"], job["company"], job["url"], job["location"], job["source"])
+                )
+                cursor2.close()
+                conn.commit()
+                saved += 1
+            except Exception as e:
+                print(f"Job save error: {e}")
                 continue
-            cursor2 = conn.cursor()
-            cursor2.execute(
-                "INSERT INTO jobs (title, company, url, location, source) VALUES (%s, %s, %s, %s, %s)",
-                (job["title"], job["company"], job["url"], job["location"], job["source"])
-            )
-            cursor2.close()
-            saved += 1
-        conn.commit()
         print(f"Saved: {saved}, Skipped (duplicate): {skipped}")
+        return {"saved": saved, "skipped": skipped}
     except Exception as e:
         print(f"DB Error: {e}")
+        return {"saved": 0, "skipped": 0}
     finally:
         if conn: conn.close()
 
