@@ -182,5 +182,99 @@ def get_saved_jobs():
         if cursor: cursor.close()
         if conn: conn.close()
 
+@app.route('/setup-apply-tracker')
+def setup_apply_tracker():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS apply_tracker (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                job_id INT NOT NULL,
+                status VARCHAR(20) DEFAULT 'Applied',
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_apply (user_id, job_id)
+            )
+        """)
+        conn.commit()
+        return jsonify({"message": "apply_tracker table created!"}), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/apply-job/<int:job_id>', methods=['POST'])
+@jwt_required()
+def apply_job(job_id):
+    user_id = get_jwt_identity()
+    data = request.json or {}
+    status = data.get('status', 'Applied')
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO apply_tracker (user_id, job_id, status) VALUES (%s, %s, %s)",
+            (user_id, job_id, status)
+        )
+        conn.commit()
+        return jsonify({"message": "Application tracked!"}), 201
+    except Exception as e:
+        return jsonify({"message": "Already applied!"}), 400
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/update-apply-status/<int:job_id>', methods=['PUT'])
+@jwt_required()
+def update_apply_status(job_id):
+    user_id = get_jwt_identity()
+    data = request.json
+    status = data.get('status', 'Applied')
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE apply_tracker SET status = %s WHERE user_id = %s AND job_id = %s",
+            (status, user_id, job_id)
+        )
+        conn.commit()
+        return jsonify({"message": "Status updated!"}), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/applied-jobs', methods=['GET'])
+@jwt_required()
+def get_applied_jobs():
+    user_id = get_jwt_identity()
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT j.*, at.status, at.applied_at FROM jobs j
+            INNER JOIN apply_tracker at ON j.id = at.job_id
+            WHERE at.user_id = %s
+            ORDER BY at.applied_at DESC
+        """, (user_id,))
+        jobs = cursor.fetchall()
+        return jsonify(jobs), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
