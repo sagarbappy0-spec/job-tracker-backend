@@ -4,6 +4,9 @@ from flask_bcrypt import Bcrypt
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 import mysql.connector
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
 CORS(app, origins="*", supports_credentials=True)
@@ -19,6 +22,27 @@ def get_db():
         database=os.environ.get("DB_NAME") or os.environ.get("MYSQLDB"),
         port=int(os.environ.get("DB_PORT") or os.environ.get("MYSQLPORT") or 3306)
     )
+
+def send_email(to_email, subject, html_body):
+    """Gmail SMTP দিয়ে একটা email পাঠায়"""
+    try:
+        sender_email = os.environ.get("EMAIL_USER")
+        sender_password = os.environ.get("EMAIL_PASS")
+
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(html_body, 'html'))
+
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+        server.login(sender_email, sender_password)
+        server.sendmail(sender_email, to_email, msg.as_string())
+        server.quit()
+        return True
+    except Exception as e:
+        print(f"Email send error for {to_email}: {e}")
+        return False
 
 @app.route('/')
 def home():
@@ -270,6 +294,80 @@ def get_applied_jobs():
         """, (user_id,))
         jobs = cursor.fetchall()
         return jsonify(jobs), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+# ============ EMAIL ALERTS ============
+
+@app.route('/setup-email-alerts')
+def setup_email_alerts():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("""
+            ALTER TABLE jobs ADD COLUMN IF NOT EXISTS is_alerted TINYINT DEFAULT 0
+        """)
+        conn.commit()
+        return jsonify({"message": "Email alerts setup complete! is_alerted column added."}), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/send-alerts')
+def send_alerts():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("SELECT * FROM jobs WHERE is_alerted = 0 ORDER BY id DESC LIMIT 50")
+        new_jobs = cursor.fetchall()
+
+        if not new_jobs:
+            return jsonify({"message": "No new jobs to alert about right now."}), 200
+
+        cursor.execute("SELECT email FROM users")
+        users = cursor.fetchall()
+
+        if not users:
+            return jsonify({"message": "No users found to send alerts to."}), 200
+
+        job_list_html = ""
+        for job in new_jobs:
+            title = job.get('title') or 'Untitled Job'
+            company = job.get('company') or ''
+            url = job.get('url') or job.get('link') or '#'
+            job_list_html += f"<li><b>{title}</b> at {company} &nbsp; <a href='{url}'>Apply Here</a></li>"
+
+        subject = f"{len(new_jobs)} New Remote Jobs Found!"
+        body = f"""
+        <h3>Hi there!</h3>
+        <p>We found {len(new_jobs)} new remote jobs for you:</p>
+        <ul>{job_list_html}</ul>
+        <p>Visit your dashboard to see more and apply!</p>
+        """
+
+        sent_count = 0
+        for user in users:
+            if send_email(user['email'], subject, body):
+                sent_count += 1
+
+        job_ids = [job['id'] for job in new_jobs]
+        placeholders = ','.join(['%s'] * len(job_ids))
+        cursor.execute(f"UPDATE jobs SET is_alerted = 1 WHERE id IN ({placeholders})", job_ids)
+        conn.commit()
+
+        return jsonify({
+            "message": f"Alerts sent to {sent_count} users about {len(new_jobs)} new jobs!"
+        }), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
     finally:
