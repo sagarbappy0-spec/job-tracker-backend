@@ -5,8 +5,15 @@ from flask_jwt_extended import JWTManager, create_access_token, jwt_required, ge
 import mysql.connector
 import os
 import smtplib
+import socket
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+# Railway এর IPv6 network সমস্যা এড়াতে, সব connection এ IPv4 force করা
+_original_getaddrinfo = socket.getaddrinfo
+def _force_ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = _force_ipv4_getaddrinfo
 
 app = Flask(__name__)
 CORS(app, origins="*", supports_credentials=True)
@@ -315,6 +322,22 @@ def setup_email_alerts():
         """)
         conn.commit()
         return jsonify({"message": "Email alerts setup complete! is_alerted column added."}), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/reset-alerts')
+def reset_alerts():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE jobs SET is_alerted = 0")
+        conn.commit()
+        return jsonify({"message": "All jobs reset to un-alerted, ready for testing again!"}), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
     finally:
