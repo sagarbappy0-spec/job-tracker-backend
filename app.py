@@ -310,7 +310,7 @@ def setup_email_alerts():
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute("""
-            ALTER TABLE jobs ADD COLUMN IF NOT EXISTS is_alerted TINYINT DEFAULT 0
+            ALTER TABLE jobs ADD COLUMN is_alerted TINYINT DEFAULT 0
         """)
         conn.commit()
         return jsonify({"message": "Email alerts setup complete! is_alerted column added."}), 200
