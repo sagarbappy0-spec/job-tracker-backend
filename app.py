@@ -4,16 +4,7 @@ from flask_bcrypt import Bcrypt
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 import mysql.connector
 import os
-import smtplib
-import socket
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-
-# Railway এর IPv6 network সমস্যা এড়াতে, সব connection এ IPv4 force করা
-_original_getaddrinfo = socket.getaddrinfo
-def _force_ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-    return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
-socket.getaddrinfo = _force_ipv4_getaddrinfo
+import requests
 
 app = Flask(__name__)
 CORS(app, origins="*", supports_credentials=True)
@@ -31,23 +22,29 @@ def get_db():
     )
 
 def send_email(to_email, subject, html_body):
-    """Gmail SMTP দিয়ে একটা email পাঠায়"""
+    """Brevo এর API দিয়ে email পাঠায় (SMTP port block সমস্যা এড়াতে)"""
     try:
+        api_key = os.environ.get("BREVO_API_KEY")
         sender_email = os.environ.get("EMAIL_USER")
-        sender_password = os.environ.get("EMAIL_PASS")
 
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = to_email
-        msg['Subject'] = subject
-        msg.attach(MIMEText(html_body, 'html'))
-
-        server = smtplib.SMTP('smtp.gmail.com', 587, timeout=10)
-        server.starttls()
-        server.login(sender_email, sender_password)
-        server.sendmail(sender_email, to_email, msg.as_string())
-        server.quit()
-        return True
+        url = "https://api.brevo.com/v3/smtp/email"
+        headers = {
+            "accept": "application/json",
+            "api-key": api_key,
+            "content-type": "application/json"
+        }
+        payload = {
+            "sender": {"name": "JobTracker", "email": sender_email},
+            "to": [{"email": to_email}],
+            "subject": subject,
+            "htmlContent": html_body
+        }
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        if response.status_code in [200, 201]:
+            return True
+        else:
+            print(f"Email send error for {to_email}: {response.status_code} {response.text}")
+            return False
     except Exception as e:
         print(f"Email send error for {to_email}: {e}")
         return False
