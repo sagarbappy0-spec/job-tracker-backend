@@ -18,12 +18,17 @@ def scrape_remotive():
         response = requests.get("https://remotive.com/api/remote-jobs?limit=30", timeout=15)
         data = response.json()
         for job in data.get("jobs", []):
+            tags = job.get("tags", [])
             jobs.append({
                 "title": job.get("title", "N/A"),
                 "company": job.get("company_name", "N/A"),
                 "url": job.get("url", "N/A"),
-                "location": "Remote",
-                "source": "Remotive"
+                "location": job.get("candidate_required_location") or "Remote",
+                "source": "Remotive",
+                "tags": ", ".join(tags) if tags else None,
+                "experience_level": None,
+                "salary_min": None,
+                "salary_max": None
             })
     except Exception as e:
         print(f"Remotive Error: {e}")
@@ -35,12 +40,17 @@ def scrape_arbeitnow():
         response = requests.get("https://www.arbeitnow.com/api/job-board-api", timeout=15)
         data = response.json()
         for job in data.get("data", [])[:30]:
+            tags = job.get("tags", [])
             jobs.append({
                 "title": job.get("title", "N/A"),
                 "company": job.get("company_name", "N/A"),
                 "url": job.get("url", "N/A"),
                 "location": job.get("location", "Remote"),
-                "source": "Arbeitnow"
+                "source": "Arbeitnow",
+                "tags": ", ".join(tags) if tags else None,
+                "experience_level": None,
+                "salary_min": None,
+                "salary_max": None
             })
     except Exception as e:
         print(f"Arbeitnow Error: {e}")
@@ -57,12 +67,17 @@ def scrape_remoteok():
         data = response.json()
         for job in data[1:31]:
             if isinstance(job, dict) and job.get("position"):
+                tags = job.get("tags", [])
                 jobs.append({
                     "title": job.get("position", "N/A"),
                     "company": job.get("company", "N/A"),
                     "url": job.get("url", "N/A"),
-                    "location": "Remote",
-                    "source": "RemoteOK"
+                    "location": job.get("location") or "Remote",
+                    "source": "RemoteOK",
+                    "tags": ", ".join(tags) if tags else None,
+                    "experience_level": None,
+                    "salary_min": job.get("salary_min") or None,
+                    "salary_max": job.get("salary_max") or None
                 })
     except Exception as e:
         print(f"RemoteOK Error: {e}")
@@ -93,7 +108,11 @@ def scrape_weworkremotely():
                     "company": company,
                     "url": link.text or "N/A",
                     "location": "Remote",
-                    "source": "WeWorkRemotely"
+                    "source": "WeWorkRemotely",
+                    "tags": None,
+                    "experience_level": None,
+                    "salary_min": None,
+                    "salary_max": None
                 })
                 count += 1
     except Exception as e:
@@ -113,8 +132,12 @@ def scrape_jobicy():
                 "title": job.get("jobTitle", "N/A"),
                 "company": job.get("companyName", "N/A"),
                 "url": job.get("url", "N/A"),
-                "location": job.get("jobGeo", "Remote"),
-                "source": "Jobicy"
+                "location": job.get("jobGeo") or "Remote",
+                "source": "Jobicy",
+                "tags": None,
+                "experience_level": job.get("jobLevel") or None,
+                "salary_min": job.get("annualSalaryMin") or None,
+                "salary_max": job.get("annualSalaryMax") or None
             })
     except Exception as e:
         print(f"Jobicy Error: {e}")
@@ -140,8 +163,9 @@ def save_jobs(jobs):
                     continue
                 cursor2 = conn.cursor(buffered=True)
                 cursor2.execute(
-                    "INSERT INTO jobs (title, company, url, location, source) VALUES (%s, %s, %s, %s, %s)",
-                    (job["title"], job["company"], job["url"], job["location"], job["source"])
+                    "INSERT INTO jobs (title, company, url, location, source, tags, experience_level, salary_min, salary_max) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (job["title"], job["company"], job["url"], job["location"], job["source"],
+                     job.get("tags"), job.get("experience_level"), job.get("salary_min"), job.get("salary_max"))
                 )
                 cursor2.close()
                 conn.commit()

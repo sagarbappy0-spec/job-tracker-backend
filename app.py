@@ -113,9 +113,56 @@ def get_jobs():
         cursor = conn.cursor(dictionary=True)
         cursor.execute("DELETE FROM jobs WHERE created_at < NOW() - INTERVAL 30 DAY")
         conn.commit()
-        cursor.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 200")
+
+        keyword = request.args.get('keyword', '').strip()
+        location = request.args.get('location', '').strip()
+        experience = request.args.get('experience', '').strip()
+        salary_min = request.args.get('salary_min', '').strip()
+
+        query = "SELECT * FROM jobs WHERE 1=1"
+        params = []
+
+        if keyword:
+            query += " AND (title LIKE %s OR company LIKE %s OR tags LIKE %s)"
+            kw = f"%{keyword}%"
+            params += [kw, kw, kw]
+
+        if location:
+            query += " AND location LIKE %s"
+            params.append(f"%{location}%")
+
+        if experience:
+            query += " AND experience_level LIKE %s"
+            params.append(f"%{experience}%")
+
+        if salary_min:
+            query += " AND (salary_min >= %s OR salary_max >= %s)"
+            params += [salary_min, salary_min]
+
+        query += " ORDER BY id DESC LIMIT 200"
+
+        cursor.execute(query, tuple(params))
         jobs = cursor.fetchall()
         return jsonify(jobs), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/setup-search-filters')
+def setup_search_filters():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("ALTER TABLE jobs ADD COLUMN tags VARCHAR(500)")
+        cursor.execute("ALTER TABLE jobs ADD COLUMN experience_level VARCHAR(50)")
+        cursor.execute("ALTER TABLE jobs ADD COLUMN salary_min INT")
+        cursor.execute("ALTER TABLE jobs ADD COLUMN salary_max INT")
+        conn.commit()
+        return jsonify({"message": "Search filter columns added! (tags, experience_level, salary_min, salary_max)"}), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
     finally:
