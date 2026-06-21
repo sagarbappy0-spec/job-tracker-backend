@@ -176,7 +176,7 @@ def debug_sample_jobs():
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT id, title, company, location, source, tags, experience_level, salary_min, salary_max FROM jobs ORDER BY id DESC LIMIT 10")
+        cursor.execute("SELECT id, title, company, location, source, tags, experience_level, salary_min, salary_max FROM jobs WHERE source = 'RemoteOK' ORDER BY id DESC LIMIT 10")
         jobs = cursor.fetchall()
         return jsonify(jobs), 200
     except Exception as e:
