@@ -8,10 +8,10 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import mysql.connector
 import os
 import requests
+import secrets
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
-
-# Railway একটা proxy এর পিছনে চলে, তাই আসল user এর IP ঠিকমতো পেতে এটা দরকার
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 
 CORS(app, origins="*", supports_credentials=True)
@@ -20,6 +20,10 @@ app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "supersecretkey"
 jwt = JWTManager(app)
 
 limiter = Limiter(key_func=get_remote_address, app=app, default_limits=[])
+
+MAX_FAILED_ATTEMPTS = 5
+LOCKOUT_MINUTES = 15
+FRONTEND_URL = "https://job-dashboard-psi-lovat.vercel.app"
 
 @app.errorhandler(429)
 def ratelimit_handler(e):
@@ -66,6 +70,48 @@ def send_email(to_email, subject, html_body):
 def home():
     return jsonify({"status": "Backend is running!"})
 
+@app.route('/setup-account-lockout')
+def setup_account_lockout():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("ALTER TABLE users ADD COLUMN failed_login_attempts INT DEFAULT 0")
+        cursor.execute("ALTER TABLE users ADD COLUMN account_locked_until DATETIME NULL")
+        conn.commit()
+        return jsonify({"message": "Account lockout columns added! (failed_login_attempts, account_locked_until)"}), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/setup-password-reset')
+def setup_password_reset():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                token VARCHAR(100) NOT NULL UNIQUE,
+                expires_at DATETIME NOT NULL,
+                used TINYINT DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        return jsonify({"message": "password_reset_tokens table created!"}), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
 @app.route('/register', methods=['POST'])
 @limiter.limit("5 per hour")
 def register():
@@ -99,12 +145,119 @@ def login():
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM users WHERE email = %s", (data['email'],))
         user = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        if user and bcrypt.check_password_hash(user['password'], data['password']):
+
+        if not user:
+            return jsonify({"message": "Invalid credentials"}), 401
+
+        locked_until = user.get('account_locked_until')
+        if locked_until and locked_until > datetime.now():
+            remaining = int((locked_until - datetime.now()).total_seconds() / 60) + 1
+            return jsonify({"message": f"Account locked due to too many failed attempts. Try again in {remaining} minute(s), or reset your password."}), 403
+
+        if bcrypt.check_password_hash(user['password'], data['password']):
+            cursor.execute(
+                "UPDATE users SET failed_login_attempts = 0, account_locked_until = NULL WHERE id = %s",
+                (user['id'],)
+            )
+            conn.commit()
             token = create_access_token(identity=str(user['id']))
             return jsonify({"token": token}), 200
-        return jsonify({"message": "Invalid credentials"}), 401
+        else:
+            new_attempts = (user.get('failed_login_attempts') or 0) + 1
+            if new_attempts >= MAX_FAILED_ATTEMPTS:
+                lock_until = datetime.now() + timedelta(minutes=LOCKOUT_MINUTES)
+                cursor.execute(
+                    "UPDATE users SET failed_login_attempts = %s, account_locked_until = %s WHERE id = %s",
+                    (new_attempts, lock_until, user['id'])
+                )
+                conn.commit()
+                return jsonify({"message": f"Account locked due to too many failed attempts. Try again in {LOCKOUT_MINUTES} minute(s), or reset your password."}), 403
+            else:
+                cursor.execute(
+                    "UPDATE users SET failed_login_attempts = %s WHERE id = %s",
+                    (new_attempts, user['id'])
+                )
+                conn.commit()
+                remaining = MAX_FAILED_ATTEMPTS - new_attempts
+                return jsonify({"message": f"Invalid credentials. {remaining} attempt(s) remaining before lockout."}), 401
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/forgot-password', methods=['POST'])
+@limiter.limit("3 per hour")
+def forgot_password():
+    data = request.json or {}
+    email = data.get('email', '').strip()
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
+        user = cursor.fetchone()
+
+        if user:
+            token = secrets.token_urlsafe(32)
+            expires_at = datetime.now() + timedelta(minutes=30)
+            cursor.execute(
+                "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES (%s, %s, %s)",
+                (user['id'], token, expires_at)
+            )
+            conn.commit()
+
+            reset_link = f"{FRONTEND_URL}/?reset_token={token}"
+            subject = "Reset your Job Tracker password"
+            body = f"""
+            <h3>Password Reset Request</h3>
+            <p>We received a request to reset your password. Click the link below to set a new one:</p>
+            <p><a href="{reset_link}">Reset My Password</a></p>
+            <p>This link will expire in 30 minutes. If you didn't request this, you can safely ignore this email.</p>
+            """
+            send_email(email, subject, body)
+
+        # নিরাপত্তার জন্য: email থাকুক বা না থাকুক, একই message — যাতে কেউ guess করে registered email খুঁজতে না পারে
+        return jsonify({"message": "If that email is registered, a password reset link has been sent."}), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/reset-password', methods=['POST'])
+@limiter.limit("5 per hour")
+def reset_password():
+    data = request.json or {}
+    token = data.get('token', '').strip()
+    new_password = data.get('new_password', '')
+    conn = None
+    cursor = None
+    try:
+        if len(new_password) < 6:
+            return jsonify({"message": "Password must be at least 6 characters."}), 400
+
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM password_reset_tokens WHERE token = %s AND used = 0", (token,))
+        reset_row = cursor.fetchone()
+
+        if not reset_row:
+            return jsonify({"message": "Invalid or already-used reset link."}), 400
+
+        if reset_row['expires_at'] < datetime.now():
+            return jsonify({"message": "This reset link has expired. Please request a new one."}), 400
+
+        hashed_pw = bcrypt.generate_password_hash(new_password).decode('utf-8')
+        cursor.execute(
+            "UPDATE users SET password = %s, failed_login_attempts = 0, account_locked_until = NULL WHERE id = %s",
+            (hashed_pw, reset_row['user_id'])
+        )
+        cursor.execute("UPDATE password_reset_tokens SET used = 1 WHERE id = %s", (reset_row['id'],))
+        conn.commit()
+
+        return jsonify({"message": "Password reset successful! You can now log in with your new password."}), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
     finally:
