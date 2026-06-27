@@ -2,15 +2,28 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_bcrypt import Bcrypt
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
 import mysql.connector
 import os
 import requests
 
 app = Flask(__name__)
+
+# Railway একটা proxy এর পিছনে চলে, তাই আসল user এর IP ঠিকমতো পেতে এটা দরকার
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+
 CORS(app, origins="*", supports_credentials=True)
 bcrypt = Bcrypt(app)
 app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "supersecretkey")
 jwt = JWTManager(app)
+
+limiter = Limiter(key_func=get_remote_address, app=app, default_limits=[])
+
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    return jsonify({"message": "Too many attempts. Please wait a bit and try again."}), 429
 
 def get_db():
     return mysql.connector.connect(
@@ -54,6 +67,7 @@ def home():
     return jsonify({"status": "Backend is running!"})
 
 @app.route('/register', methods=['POST'])
+@limiter.limit("5 per hour")
 def register():
     data = request.json
     conn = None
@@ -75,6 +89,7 @@ def register():
         if conn: conn.close()
 
 @app.route('/login', methods=['POST'])
+@limiter.limit("5 per minute")
 def login():
     data = request.json
     conn = None

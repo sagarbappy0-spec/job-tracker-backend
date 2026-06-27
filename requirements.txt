@@ -7,3 +7,4 @@ python-dotenv
 gunicorn
 flask-bcrypt
 flask-jwt-extended
+flask-limiter
