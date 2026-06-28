@@ -8,6 +8,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import mysql.connector
 import os
 import requests
+import re
 import secrets
 from datetime import datetime, timedelta
 
@@ -24,10 +25,24 @@ limiter = Limiter(key_func=get_remote_address, app=app, default_limits=[])
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_MINUTES = 15
 FRONTEND_URL = "https://job-dashboard-psi-lovat.vercel.app"
+EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 @app.errorhandler(429)
 def ratelimit_handler(e):
     return jsonify({"message": "Too many attempts. Please wait a bit and try again."}), 429
+
+# ============ SECURITY HEADERS ============
+@app.after_request
+def set_security_headers(response):
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    return response
+
+def is_valid_email(email):
+    return bool(email) and bool(EMAIL_REGEX.match(email))
 
 def get_db():
     return mysql.connector.connect(
@@ -115,16 +130,28 @@ def setup_password_reset():
 @app.route('/register', methods=['POST'])
 @limiter.limit("5 per hour")
 def register():
-    data = request.json
+    data = request.json or {}
+    username = (data.get('username') or '').strip()
+    email = (data.get('email') or '').strip()
+    password = data.get('password') or ''
+
+    # ---- Input Validation ----
+    if not username:
+        return jsonify({"message": "Username cannot be empty."}), 400
+    if not is_valid_email(email):
+        return jsonify({"message": "Please enter a valid email address."}), 400
+    if len(password) < 6:
+        return jsonify({"message": "Password must be at least 6 characters."}), 400
+
     conn = None
     cursor = None
     try:
-        hashed_pw = bcrypt.generate_password_hash(data['password']).decode('utf-8')
+        hashed_pw = bcrypt.generate_password_hash(password).decode('utf-8')
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO users (username, email, password) VALUES (%s, %s, %s)",
-            (data['username'], data['email'], hashed_pw)
+            (username, email, hashed_pw)
         )
         conn.commit()
         return jsonify({"message": "User registered successfully"}), 201
@@ -137,13 +164,20 @@ def register():
 @app.route('/login', methods=['POST'])
 @limiter.limit("5 per minute")
 def login():
-    data = request.json
+    data = request.json or {}
+    email = (data.get('email') or '').strip()
+    password = data.get('password') or ''
+
+    # ---- Input Validation ----
+    if not email or not password:
+        return jsonify({"message": "Email and password are required."}), 400
+
     conn = None
     cursor = None
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM users WHERE email = %s", (data['email'],))
+        cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
         user = cursor.fetchone()
 
         if not user:
@@ -154,7 +188,7 @@ def login():
             remaining = int((locked_until - datetime.now()).total_seconds() / 60) + 1
             return jsonify({"message": f"Account locked due to too many failed attempts. Try again in {remaining} minute(s), or reset your password."}), 403
 
-        if bcrypt.check_password_hash(user['password'], data['password']):
+        if bcrypt.check_password_hash(user['password'], password):
             cursor.execute(
                 "UPDATE users SET failed_login_attempts = 0, account_locked_until = NULL WHERE id = %s",
                 (user['id'],)
@@ -190,7 +224,12 @@ def login():
 @limiter.limit("3 per hour")
 def forgot_password():
     data = request.json or {}
-    email = data.get('email', '').strip()
+    email = (data.get('email') or '').strip()
+
+    # ---- Input Validation ----
+    if not is_valid_email(email):
+        return jsonify({"message": "Please enter a valid email address."}), 400
+
     conn = None
     cursor = None
     try:
@@ -218,7 +257,6 @@ def forgot_password():
             """
             send_email(email, subject, body)
 
-        # নিরাপত্তার জন্য: email থাকুক বা না থাকুক, একই message — যাতে কেউ guess করে registered email খুঁজতে না পারে
         return jsonify({"message": "If that email is registered, a password reset link has been sent."}), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
@@ -230,14 +268,18 @@ def forgot_password():
 @limiter.limit("5 per hour")
 def reset_password():
     data = request.json or {}
-    token = data.get('token', '').strip()
-    new_password = data.get('new_password', '')
+    token = (data.get('token') or '').strip()
+    new_password = data.get('new_password') or ''
+
+    # ---- Input Validation ----
+    if not token:
+        return jsonify({"message": "Reset token is missing."}), 400
+    if len(new_password) < 6:
+        return jsonify({"message": "Password must be at least 6 characters."}), 400
+
     conn = None
     cursor = None
     try:
-        if len(new_password) < 6:
-            return jsonify({"message": "Password must be at least 6 characters."}), 400
-
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM password_reset_tokens WHERE token = %s AND used = 0", (token,))
