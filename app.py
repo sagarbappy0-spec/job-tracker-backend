@@ -18,12 +18,14 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 CORS(app, origins="*", supports_credentials=True)
 bcrypt = Bcrypt(app)
 app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "supersecretkey")
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(minutes=15)
 jwt = JWTManager(app)
 
 limiter = Limiter(key_func=get_remote_address, app=app, default_limits=[])
 
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_MINUTES = 15
+REFRESH_TOKEN_DAYS = 30
 FRONTEND_URL = "https://job-dashboard-psi-lovat.vercel.app"
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -31,7 +33,6 @@ EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 def ratelimit_handler(e):
     return jsonify({"message": "Too many attempts. Please wait a bit and try again."}), 429
 
-# ============ SECURITY HEADERS ============
 @app.after_request
 def set_security_headers(response):
     response.headers['X-Frame-Options'] = 'DENY'
@@ -81,6 +82,17 @@ def send_email(to_email, subject, html_body):
         print(f"Email send error for {to_email}: {e}")
         return False
 
+def create_refresh_token(cursor, conn, user_id):
+    """নতুন refresh token বানিয়ে database-এ সেভ করে, এবং token string ফেরত দেয়"""
+    new_token = secrets.token_urlsafe(32)
+    expires_at = datetime.now() + timedelta(days=REFRESH_TOKEN_DAYS)
+    cursor.execute(
+        "INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES (%s, %s, %s)",
+        (user_id, new_token, expires_at)
+    )
+    conn.commit()
+    return new_token
+
 @app.route('/')
 def home():
     return jsonify({"status": "Backend is running!"})
@@ -127,6 +139,31 @@ def setup_password_reset():
         if cursor: cursor.close()
         if conn: conn.close()
 
+@app.route('/setup-refresh-tokens')
+def setup_refresh_tokens():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                token VARCHAR(100) NOT NULL UNIQUE,
+                expires_at DATETIME NOT NULL,
+                revoked TINYINT DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        return jsonify({"message": "refresh_tokens table created!"}), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
 @app.route('/register', methods=['POST'])
 @limiter.limit("5 per hour")
 def register():
@@ -135,7 +172,6 @@ def register():
     email = (data.get('email') or '').strip()
     password = data.get('password') or ''
 
-    # ---- Input Validation ----
     if not username:
         return jsonify({"message": "Username cannot be empty."}), 400
     if not is_valid_email(email):
@@ -168,7 +204,6 @@ def login():
     email = (data.get('email') or '').strip()
     password = data.get('password') or ''
 
-    # ---- Input Validation ----
     if not email or not password:
         return jsonify({"message": "Email and password are required."}), 400
 
@@ -194,8 +229,9 @@ def login():
                 (user['id'],)
             )
             conn.commit()
-            token = create_access_token(identity=str(user['id']))
-            return jsonify({"token": token}), 200
+            access_token = create_access_token(identity=str(user['id']))
+            refresh_token = create_refresh_token(cursor, conn, user['id'])
+            return jsonify({"token": access_token, "refresh_token": refresh_token}), 200
         else:
             new_attempts = (user.get('failed_login_attempts') or 0) + 1
             if new_attempts >= MAX_FAILED_ATTEMPTS:
@@ -220,13 +256,66 @@ def login():
         if cursor: cursor.close()
         if conn: conn.close()
 
+@app.route('/refresh', methods=['POST'])
+@limiter.limit("30 per hour")
+def refresh():
+    data = request.json or {}
+    old_token = (data.get('refresh_token') or '').strip()
+
+    if not old_token:
+        return jsonify({"message": "Refresh token is required."}), 400
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM refresh_tokens WHERE token = %s AND revoked = 0", (old_token,))
+        row = cursor.fetchone()
+
+        if not row:
+            return jsonify({"message": "Invalid or revoked session. Please log in again."}), 401
+
+        if row['expires_at'] < datetime.now():
+            return jsonify({"message": "Session expired. Please log in again."}), 401
+
+        # Rotation: পুরনো refresh token বাতিল করে নতুন একটা ইস্যু করা (চুরি হলে ঝুঁকি কমায়)
+        cursor.execute("UPDATE refresh_tokens SET revoked = 1 WHERE id = %s", (row['id'],))
+        new_refresh_token = create_refresh_token(cursor, conn, row['user_id'])
+        new_access_token = create_access_token(identity=str(row['user_id']))
+
+        return jsonify({"token": new_access_token, "refresh_token": new_refresh_token}), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    data = request.json or {}
+    refresh_token = (data.get('refresh_token') or '').strip()
+    if refresh_token:
+        conn = None
+        cursor = None
+        try:
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute("UPDATE refresh_tokens SET revoked = 1 WHERE token = %s", (refresh_token,))
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            if cursor: cursor.close()
+            if conn: conn.close()
+    return jsonify({"message": "Logged out successfully."}), 200
+
 @app.route('/forgot-password', methods=['POST'])
 @limiter.limit("3 per hour")
 def forgot_password():
     data = request.json or {}
     email = (data.get('email') or '').strip()
 
-    # ---- Input Validation ----
     if not is_valid_email(email):
         return jsonify({"message": "Please enter a valid email address."}), 400
 
@@ -271,7 +360,6 @@ def reset_password():
     token = (data.get('token') or '').strip()
     new_password = data.get('new_password') or ''
 
-    # ---- Input Validation ----
     if not token:
         return jsonify({"message": "Reset token is missing."}), 400
     if len(new_password) < 6:
@@ -297,6 +385,8 @@ def reset_password():
             (hashed_pw, reset_row['user_id'])
         )
         cursor.execute("UPDATE password_reset_tokens SET used = 1 WHERE id = %s", (reset_row['id'],))
+        # security bonus: password reset হলে এই user-এর সব পুরনো session (refresh token) বাতিল করা
+        cursor.execute("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = %s", (reset_row['user_id'],))
         conn.commit()
 
         return jsonify({"message": "Password reset successful! You can now log in with your new password."}), 200
