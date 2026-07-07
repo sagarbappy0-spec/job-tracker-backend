@@ -2,7 +2,7 @@ flask
 flask-cors
 requests
 beautifulsoup4
-mysql-connector-python
+psycopg2-binary
 python-dotenv
 gunicorn
 flask-bcrypt

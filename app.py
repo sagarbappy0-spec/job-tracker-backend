@@ -5,7 +5,8 @@ from flask_jwt_extended import JWTManager, create_access_token, jwt_required, ge
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
-import mysql.connector
+import psycopg2
+import psycopg2.extras
 import os
 import requests
 import re
@@ -46,20 +47,12 @@ def is_valid_email(email):
     return bool(email) and bool(EMAIL_REGEX.match(email))
 
 def get_db():
-    return mysql.connector.connect(
-        host=os.environ.get("DB_HOST") or os.environ.get("MYSQLHOST"),
-        user=os.environ.get("DB_USER") or os.environ.get("MYSQLUSER"),
-        password=os.environ.get("DB_PASSWORD") or os.environ.get("MYSQLPASSWORD"),
-        database=os.environ.get("DB_NAME") or os.environ.get("MYSQLDB"),
-        port=int(os.environ.get("DB_PORT") or os.environ.get("MYSQLPORT") or 3306)
-    )
+    return psycopg2.connect(os.environ.get("DATABASE_URL"), sslmode='require')
 
 def send_email(to_email, subject, html_body):
-    """Brevo এর API দিয়ে email পাঠায় (SMTP port block সমস্যা এড়াতে)"""
     try:
         api_key = os.environ.get("BREVO_API_KEY")
         sender_email = os.environ.get("EMAIL_USER")
-
         url = "https://api.brevo.com/v3/smtp/email"
         headers = {
             "accept": "application/json",
@@ -73,17 +66,12 @@ def send_email(to_email, subject, html_body):
             "htmlContent": html_body
         }
         response = requests.post(url, json=payload, headers=headers, timeout=10)
-        if response.status_code in [200, 201]:
-            return True
-        else:
-            print(f"Email send error for {to_email}: {response.status_code} {response.text}")
-            return False
+        return response.status_code in [200, 201]
     except Exception as e:
         print(f"Email send error for {to_email}: {e}")
         return False
 
 def create_refresh_token(cursor, conn, user_id):
-    """নতুন refresh token বানিয়ে database-এ সেভ করে, এবং token string ফেরত দেয়"""
     new_token = secrets.token_urlsafe(32)
     expires_at = datetime.now() + timedelta(days=REFRESH_TOKEN_DAYS)
     cursor.execute(
@@ -95,69 +83,91 @@ def create_refresh_token(cursor, conn, user_id):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "Backend is running!"})
+    return jsonify({"status": "Backend is running on Render + PostgreSQL!"})
 
-@app.route('/setup-account-lockout')
-def setup_account_lockout():
+@app.route('/setup-all')
+def setup_all():
+    """একবারেই সব table বানায়"""
     conn = None
     cursor = None
     try:
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute("ALTER TABLE users ADD COLUMN failed_login_attempts INT DEFAULT 0")
-        cursor.execute("ALTER TABLE users ADD COLUMN account_locked_until DATETIME NULL")
-        conn.commit()
-        return jsonify({"message": "Account lockout columns added! (failed_login_attempts, account_locked_until)"}), 200
-    except Exception as e:
-        return jsonify({"message": str(e)}), 500
-    finally:
-        if cursor: cursor.close()
-        if conn: conn.close()
 
-@app.route('/setup-password-reset')
-def setup_password_reset():
-    conn = None
-    cursor = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(100) NOT NULL,
+                email VARCHAR(150) UNIQUE NOT NULL,
+                password VARCHAR(255) NOT NULL,
+                failed_login_attempts INT DEFAULT 0,
+                account_locked_until TIMESTAMP NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                id SERIAL PRIMARY KEY,
+                title VARCHAR(300),
+                company VARCHAR(200),
+                url TEXT,
+                location VARCHAR(200),
+                source VARCHAR(100),
+                tags VARCHAR(500),
+                experience_level VARCHAR(50),
+                salary_min INT,
+                salary_max INT,
+                is_alerted SMALLINT DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS saved_jobs (
+                id SERIAL PRIMARY KEY,
+                user_id INT NOT NULL,
+                job_id INT NOT NULL,
+                saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, job_id)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS apply_tracker (
+                id SERIAL PRIMARY KEY,
+                user_id INT NOT NULL,
+                job_id INT NOT NULL,
+                status VARCHAR(20) DEFAULT 'Applied',
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, job_id)
+            )
+        """)
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS password_reset_tokens (
-                id INT AUTO_INCREMENT PRIMARY KEY,
+                id SERIAL PRIMARY KEY,
                 user_id INT NOT NULL,
                 token VARCHAR(100) NOT NULL UNIQUE,
-                expires_at DATETIME NOT NULL,
-                used TINYINT DEFAULT 0,
+                expires_at TIMESTAMP NOT NULL,
+                used SMALLINT DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        conn.commit()
-        return jsonify({"message": "password_reset_tokens table created!"}), 200
-    except Exception as e:
-        return jsonify({"message": str(e)}), 500
-    finally:
-        if cursor: cursor.close()
-        if conn: conn.close()
 
-@app.route('/setup-refresh-tokens')
-def setup_refresh_tokens():
-    conn = None
-    cursor = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS refresh_tokens (
-                id INT AUTO_INCREMENT PRIMARY KEY,
+                id SERIAL PRIMARY KEY,
                 user_id INT NOT NULL,
                 token VARCHAR(100) NOT NULL UNIQUE,
-                expires_at DATETIME NOT NULL,
-                revoked TINYINT DEFAULT 0,
+                expires_at TIMESTAMP NOT NULL,
+                revoked SMALLINT DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
         conn.commit()
-        return jsonify({"message": "refresh_tokens table created!"}), 200
+        return jsonify({"message": "All tables created successfully! Ready to use."}), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
     finally:
@@ -211,7 +221,7 @@ def login():
     cursor = None
     try:
         conn = get_db()
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
         user = cursor.fetchone()
 
@@ -221,7 +231,7 @@ def login():
         locked_until = user.get('account_locked_until')
         if locked_until and locked_until > datetime.now():
             remaining = int((locked_until - datetime.now()).total_seconds() / 60) + 1
-            return jsonify({"message": f"Account locked due to too many failed attempts. Try again in {remaining} minute(s), or reset your password."}), 403
+            return jsonify({"message": f"Account locked. Try again in {remaining} minute(s), or reset your password."}), 403
 
         if bcrypt.check_password_hash(user['password'], password):
             cursor.execute(
@@ -241,7 +251,7 @@ def login():
                     (new_attempts, lock_until, user['id'])
                 )
                 conn.commit()
-                return jsonify({"message": f"Account locked due to too many failed attempts. Try again in {LOCKOUT_MINUTES} minute(s), or reset your password."}), 403
+                return jsonify({"message": f"Account locked for {LOCKOUT_MINUTES} minute(s). Reset your password to unlock."}), 403
             else:
                 cursor.execute(
                     "UPDATE users SET failed_login_attempts = %s WHERE id = %s",
@@ -261,29 +271,22 @@ def login():
 def refresh():
     data = request.json or {}
     old_token = (data.get('refresh_token') or '').strip()
-
     if not old_token:
         return jsonify({"message": "Refresh token is required."}), 400
-
     conn = None
     cursor = None
     try:
         conn = get_db()
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute("SELECT * FROM refresh_tokens WHERE token = %s AND revoked = 0", (old_token,))
         row = cursor.fetchone()
-
         if not row:
             return jsonify({"message": "Invalid or revoked session. Please log in again."}), 401
-
         if row['expires_at'] < datetime.now():
             return jsonify({"message": "Session expired. Please log in again."}), 401
-
-        # Rotation: পুরনো refresh token বাতিল করে নতুন একটা ইস্যু করা (চুরি হলে ঝুঁকি কমায়)
         cursor.execute("UPDATE refresh_tokens SET revoked = 1 WHERE id = %s", (row['id'],))
         new_refresh_token = create_refresh_token(cursor, conn, row['user_id'])
         new_access_token = create_access_token(identity=str(row['user_id']))
-
         return jsonify({"token": new_access_token, "refresh_token": new_refresh_token}), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
@@ -315,18 +318,15 @@ def logout():
 def forgot_password():
     data = request.json or {}
     email = (data.get('email') or '').strip()
-
     if not is_valid_email(email):
         return jsonify({"message": "Please enter a valid email address."}), 400
-
     conn = None
     cursor = None
     try:
         conn = get_db()
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
         user = cursor.fetchone()
-
         if user:
             token = secrets.token_urlsafe(32)
             expires_at = datetime.now() + timedelta(minutes=30)
@@ -335,17 +335,13 @@ def forgot_password():
                 (user['id'], token, expires_at)
             )
             conn.commit()
-
             reset_link = f"{FRONTEND_URL}/?reset_token={token}"
-            subject = "Reset your Job Tracker password"
-            body = f"""
+            send_email(email, "Reset your Job Tracker password", f"""
             <h3>Password Reset Request</h3>
-            <p>We received a request to reset your password. Click the link below to set a new one:</p>
+            <p>Click the link below to reset your password:</p>
             <p><a href="{reset_link}">Reset My Password</a></p>
-            <p>This link will expire in 30 minutes. If you didn't request this, you can safely ignore this email.</p>
-            """
-            send_email(email, subject, body)
-
+            <p>This link expires in 30 minutes.</p>
+            """)
         return jsonify({"message": "If that email is registered, a password reset link has been sent."}), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
@@ -359,37 +355,30 @@ def reset_password():
     data = request.json or {}
     token = (data.get('token') or '').strip()
     new_password = data.get('new_password') or ''
-
     if not token:
         return jsonify({"message": "Reset token is missing."}), 400
     if len(new_password) < 6:
         return jsonify({"message": "Password must be at least 6 characters."}), 400
-
     conn = None
     cursor = None
     try:
         conn = get_db()
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute("SELECT * FROM password_reset_tokens WHERE token = %s AND used = 0", (token,))
         reset_row = cursor.fetchone()
-
         if not reset_row:
             return jsonify({"message": "Invalid or already-used reset link."}), 400
-
         if reset_row['expires_at'] < datetime.now():
             return jsonify({"message": "This reset link has expired. Please request a new one."}), 400
-
         hashed_pw = bcrypt.generate_password_hash(new_password).decode('utf-8')
         cursor.execute(
             "UPDATE users SET password = %s, failed_login_attempts = 0, account_locked_until = NULL WHERE id = %s",
             (hashed_pw, reset_row['user_id'])
         )
         cursor.execute("UPDATE password_reset_tokens SET used = 1 WHERE id = %s", (reset_row['id'],))
-        # security bonus: password reset হলে এই user-এর সব পুরনো session (refresh token) বাতিল করা
         cursor.execute("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = %s", (reset_row['user_id'],))
         conn.commit()
-
-        return jsonify({"message": "Password reset successful! You can now log in with your new password."}), 200
+        return jsonify({"message": "Password reset successful! You can now log in."}), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
     finally:
@@ -410,8 +399,8 @@ def get_jobs():
     cursor = None
     try:
         conn = get_db()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute("DELETE FROM jobs WHERE created_at < NOW() - INTERVAL 30 DAY")
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("DELETE FROM jobs WHERE created_at < NOW() - INTERVAL '30 days'")
         conn.commit()
 
         keyword = request.args.get('keyword', '').strip()
@@ -423,86 +412,23 @@ def get_jobs():
         params = []
 
         if keyword:
-            query += " AND (title LIKE %s OR company LIKE %s OR tags LIKE %s)"
+            query += " AND (title ILIKE %s OR company ILIKE %s OR tags ILIKE %s)"
             kw = f"%{keyword}%"
             params += [kw, kw, kw]
-
         if location:
-            query += " AND location LIKE %s"
+            query += " AND location ILIKE %s"
             params.append(f"%{location}%")
-
         if experience:
-            query += " AND experience_level LIKE %s"
+            query += " AND experience_level ILIKE %s"
             params.append(f"%{experience}%")
-
         if salary_min:
             query += " AND (salary_min >= %s OR salary_max >= %s)"
             params += [salary_min, salary_min]
 
         query += " ORDER BY id DESC LIMIT 200"
-
         cursor.execute(query, tuple(params))
         jobs = cursor.fetchall()
-        return jsonify(jobs), 200
-    except Exception as e:
-        return jsonify({"message": str(e)}), 500
-    finally:
-        if cursor: cursor.close()
-        if conn: conn.close()
-
-@app.route('/setup-search-filters')
-def setup_search_filters():
-    conn = None
-    cursor = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("ALTER TABLE jobs ADD COLUMN tags VARCHAR(500)")
-        cursor.execute("ALTER TABLE jobs ADD COLUMN experience_level VARCHAR(50)")
-        cursor.execute("ALTER TABLE jobs ADD COLUMN salary_min INT")
-        cursor.execute("ALTER TABLE jobs ADD COLUMN salary_max INT")
-        conn.commit()
-        return jsonify({"message": "Search filter columns added! (tags, experience_level, salary_min, salary_max)"}), 200
-    except Exception as e:
-        return jsonify({"message": str(e)}), 500
-    finally:
-        if cursor: cursor.close()
-        if conn: conn.close()
-
-@app.route('/debug-sample-jobs')
-def debug_sample_jobs():
-    conn = None
-    cursor = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT id, title, company, location, source, tags, experience_level, salary_min, salary_max FROM jobs WHERE source = 'RemoteOK' ORDER BY id DESC LIMIT 10")
-        jobs = cursor.fetchall()
-        return jsonify(jobs), 200
-    except Exception as e:
-        return jsonify({"message": str(e)}), 500
-    finally:
-        if cursor: cursor.close()
-        if conn: conn.close()
-
-@app.route('/setup-saved-jobs')
-def setup_saved_jobs():
-    conn = None
-    cursor = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS saved_jobs (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                user_id INT NOT NULL,
-                job_id INT NOT NULL,
-                saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE KEY unique_save (user_id, job_id)
-            )
-        """)
-        conn.commit()
-        return jsonify({"message": "saved_jobs table created!"}), 200
+        return jsonify([dict(j) for j in jobs]), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
     finally:
@@ -518,10 +444,7 @@ def save_job(job_id):
     try:
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO saved_jobs (user_id, job_id) VALUES (%s, %s)",
-            (user_id, job_id)
-        )
+        cursor.execute("INSERT INTO saved_jobs (user_id, job_id) VALUES (%s, %s)", (user_id, job_id))
         conn.commit()
         return jsonify({"message": "Job saved!"}), 201
     except Exception as e:
@@ -539,10 +462,7 @@ def unsave_job(job_id):
     try:
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM saved_jobs WHERE user_id = %s AND job_id = %s",
-            (user_id, job_id)
-        )
+        cursor.execute("DELETE FROM saved_jobs WHERE user_id = %s AND job_id = %s", (user_id, job_id))
         conn.commit()
         return jsonify({"message": "Job unsaved!"}), 200
     except Exception as e:
@@ -559,40 +479,14 @@ def get_saved_jobs():
     cursor = None
     try:
         conn = get_db()
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute("""
             SELECT j.* FROM jobs j
             INNER JOIN saved_jobs sj ON j.id = sj.job_id
-            WHERE sj.user_id = %s
-            ORDER BY sj.saved_at DESC
+            WHERE sj.user_id = %s ORDER BY sj.saved_at DESC
         """, (user_id,))
         jobs = cursor.fetchall()
-        return jsonify(jobs), 200
-    except Exception as e:
-        return jsonify({"message": str(e)}), 500
-    finally:
-        if cursor: cursor.close()
-        if conn: conn.close()
-
-@app.route('/setup-apply-tracker')
-def setup_apply_tracker():
-    conn = None
-    cursor = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS apply_tracker (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                user_id INT NOT NULL,
-                job_id INT NOT NULL,
-                status VARCHAR(20) DEFAULT 'Applied',
-                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE KEY unique_apply (user_id, job_id)
-            )
-        """)
-        conn.commit()
-        return jsonify({"message": "apply_tracker table created!"}), 200
+        return jsonify([dict(j) for j in jobs]), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
     finally:
@@ -626,7 +520,7 @@ def apply_job(job_id):
 @jwt_required()
 def update_apply_status(job_id):
     user_id = get_jwt_identity()
-    data = request.json
+    data = request.json or {}
     status = data.get('status', 'Applied')
     conn = None
     cursor = None
@@ -653,35 +547,53 @@ def get_applied_jobs():
     cursor = None
     try:
         conn = get_db()
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute("""
             SELECT j.*, at.status, at.applied_at FROM jobs j
             INNER JOIN apply_tracker at ON j.id = at.job_id
-            WHERE at.user_id = %s
-            ORDER BY at.applied_at DESC
+            WHERE at.user_id = %s ORDER BY at.applied_at DESC
         """, (user_id,))
         jobs = cursor.fetchall()
-        return jsonify(jobs), 200
+        return jsonify([dict(j) for j in jobs]), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
     finally:
         if cursor: cursor.close()
         if conn: conn.close()
 
-# ============ EMAIL ALERTS ============
-
-@app.route('/setup-email-alerts')
-def setup_email_alerts():
+@app.route('/send-alerts')
+def send_alerts():
     conn = None
     cursor = None
     try:
         conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("""
-            ALTER TABLE jobs ADD COLUMN is_alerted TINYINT DEFAULT 0
-        """)
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM jobs WHERE is_alerted = 0 ORDER BY id DESC LIMIT 50")
+        new_jobs = cursor.fetchall()
+        if not new_jobs:
+            return jsonify({"message": "No new jobs to alert about."}), 200
+        cursor.execute("SELECT email FROM users")
+        users = cursor.fetchall()
+        if not users:
+            return jsonify({"message": "No users found."}), 200
+
+        job_list_html = ""
+        for job in new_jobs:
+            title = job.get('title') or 'Untitled'
+            company = job.get('company') or ''
+            url = job.get('url') or '#'
+            job_list_html += f"<li><b>{title}</b> at {company} &nbsp; <a href='{url}'>Apply Here</a></li>"
+
+        subject = f"{len(new_jobs)} New Remote Jobs Found!"
+        body = f"<h3>Hi there!</h3><p>We found {len(new_jobs)} new remote jobs:</p><ul>{job_list_html}</ul>"
+
+        sent_count = sum(1 for u in users if send_email(u['email'], subject, body))
+
+        job_ids = [job['id'] for job in new_jobs]
+        placeholders = ','.join(['%s'] * len(job_ids))
+        cursor.execute(f"UPDATE jobs SET is_alerted = 1 WHERE id IN ({placeholders})", job_ids)
         conn.commit()
-        return jsonify({"message": "Email alerts setup complete! is_alerted column added."}), 200
+        return jsonify({"message": f"Alerts sent to {sent_count} users about {len(new_jobs)} jobs!"}), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
     finally:
@@ -697,61 +609,7 @@ def reset_alerts():
         cursor = conn.cursor()
         cursor.execute("UPDATE jobs SET is_alerted = 0")
         conn.commit()
-        return jsonify({"message": "All jobs reset to un-alerted, ready for testing again!"}), 200
-    except Exception as e:
-        return jsonify({"message": str(e)}), 500
-    finally:
-        if cursor: cursor.close()
-        if conn: conn.close()
-
-@app.route('/send-alerts')
-def send_alerts():
-    conn = None
-    cursor = None
-    try:
-        conn = get_db()
-        cursor = conn.cursor(dictionary=True)
-
-        cursor.execute("SELECT * FROM jobs WHERE is_alerted = 0 ORDER BY id DESC LIMIT 50")
-        new_jobs = cursor.fetchall()
-
-        if not new_jobs:
-            return jsonify({"message": "No new jobs to alert about right now."}), 200
-
-        cursor.execute("SELECT email FROM users")
-        users = cursor.fetchall()
-
-        if not users:
-            return jsonify({"message": "No users found to send alerts to."}), 200
-
-        job_list_html = ""
-        for job in new_jobs:
-            title = job.get('title') or 'Untitled Job'
-            company = job.get('company') or ''
-            url = job.get('url') or job.get('link') or '#'
-            job_list_html += f"<li><b>{title}</b> at {company} &nbsp; <a href='{url}'>Apply Here</a></li>"
-
-        subject = f"{len(new_jobs)} New Remote Jobs Found!"
-        body = f"""
-        <h3>Hi there!</h3>
-        <p>We found {len(new_jobs)} new remote jobs for you:</p>
-        <ul>{job_list_html}</ul>
-        <p>Visit your dashboard to see more and apply!</p>
-        """
-
-        sent_count = 0
-        for user in users:
-            if send_email(user['email'], subject, body):
-                sent_count += 1
-
-        job_ids = [job['id'] for job in new_jobs]
-        placeholders = ','.join(['%s'] * len(job_ids))
-        cursor.execute(f"UPDATE jobs SET is_alerted = 1 WHERE id IN ({placeholders})", job_ids)
-        conn.commit()
-
-        return jsonify({
-            "message": f"Alerts sent to {sent_count} users about {len(new_jobs)} new jobs!"
-        }), 200
+        return jsonify({"message": "All jobs reset!"}), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 500
     finally:

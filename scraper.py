@@ -1,16 +1,10 @@
 import requests
-import mysql.connector
+import psycopg2
 import os
 import xml.etree.ElementTree as ET
 
 def get_db():
-    return mysql.connector.connect(
-        host=os.environ.get("DB_HOST") or os.environ.get("MYSQLHOST"),
-        user=os.environ.get("DB_USER") or os.environ.get("MYSQLUSER"),
-        password=os.environ.get("DB_PASSWORD") or os.environ.get("MYSQLPASSWORD"),
-        database=os.environ.get("DB_NAME") or os.environ.get("MYSQLDB"),
-        port=int(os.environ.get("DB_PORT") or os.environ.get("MYSQLPORT") or 3306)
-    )
+    return psycopg2.connect(os.environ.get("DATABASE_URL"), sslmode='require')
 
 def scrape_remotive():
     jobs = []
@@ -151,7 +145,7 @@ def save_jobs(jobs):
         conn = get_db()
         for job in jobs:
             try:
-                cursor = conn.cursor(buffered=True)
+                cursor = conn.cursor()
                 cursor.execute(
                     "SELECT id FROM jobs WHERE title = %s AND company = %s",
                     (job["title"], job["company"])
@@ -161,7 +155,7 @@ def save_jobs(jobs):
                 if existing:
                     skipped += 1
                     continue
-                cursor2 = conn.cursor(buffered=True)
+                cursor2 = conn.cursor()
                 cursor2.execute(
                     "INSERT INTO jobs (title, company, url, location, source, tags, experience_level, salary_min, salary_max) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (job["title"], job["company"], job["url"], job["location"], job["source"],
@@ -173,7 +167,7 @@ def save_jobs(jobs):
             except Exception as e:
                 print(f"Job save error: {e}")
                 continue
-        print(f"Saved: {saved}, Skipped (duplicate): {skipped}")
+        print(f"Saved: {saved}, Skipped: {skipped}")
         return {"saved": saved, "skipped": skipped}
     except Exception as e:
         print(f"DB Error: {e}")
