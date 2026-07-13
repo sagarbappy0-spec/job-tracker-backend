@@ -87,7 +87,6 @@ def home():
 
 @app.route('/setup-all')
 def setup_all():
-    """একবারেই সব table বানায়"""
     conn = None
     cursor = None
     try:
@@ -100,8 +99,13 @@ def setup_all():
                 username VARCHAR(100) NOT NULL,
                 email VARCHAR(150) UNIQUE NOT NULL,
                 password VARCHAR(255) NOT NULL,
+                role VARCHAR(20) DEFAULT 'user',
+                email_verified SMALLINT DEFAULT 0,
                 failed_login_attempts INT DEFAULT 0,
                 account_locked_until TIMESTAMP NULL,
+                password_changed_at TIMESTAMP NULL,
+                login_count INT DEFAULT 0,
+                last_login TIMESTAMP NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -174,6 +178,40 @@ def setup_all():
         if cursor: cursor.close()
         if conn: conn.close()
 
+@app.route('/setup-phase-b')
+def setup_phase_b():
+    """Phase B: users টেবিলে নতুন column যুক্ত করা"""
+    conn = None
+    cursor = None
+    results = []
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+
+        columns = [
+            ("role", "ALTER TABLE users ADD COLUMN role VARCHAR(20) DEFAULT 'user'"),
+            ("email_verified", "ALTER TABLE users ADD COLUMN email_verified SMALLINT DEFAULT 0"),
+            ("password_changed_at", "ALTER TABLE users ADD COLUMN password_changed_at TIMESTAMP NULL"),
+            ("login_count", "ALTER TABLE users ADD COLUMN login_count INT DEFAULT 0"),
+            ("last_login", "ALTER TABLE users ADD COLUMN last_login TIMESTAMP NULL"),
+        ]
+
+        for col_name, sql in columns:
+            try:
+                cursor.execute(sql)
+                conn.commit()
+                results.append(f"{col_name}: added ✅")
+            except Exception as col_err:
+                conn.rollback()
+                results.append(f"{col_name}: skipped (already exists)")
+
+        return jsonify({"message": "Phase B complete!", "details": results}), 200
+    except Exception as e:
+        return jsonify({"message": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
 @app.route('/register', methods=['POST'])
 @limiter.limit("5 per hour")
 def register():
@@ -196,8 +234,8 @@ def register():
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO users (username, email, password) VALUES (%s, %s, %s)",
-            (username, email, hashed_pw)
+            "INSERT INTO users (username, email, password, role, email_verified) VALUES (%s, %s, %s, %s, %s)",
+            (username, email, hashed_pw, 'user', 0)
         )
         conn.commit()
         return jsonify({"message": "User registered successfully"}), 201
@@ -234,14 +272,23 @@ def login():
             return jsonify({"message": f"Account locked. Try again in {remaining} minute(s), or reset your password."}), 403
 
         if bcrypt.check_password_hash(user['password'], password):
-            cursor.execute(
-                "UPDATE users SET failed_login_attempts = 0, account_locked_until = NULL WHERE id = %s",
-                (user['id'],)
-            )
+            # login সফল — সব counter reset + last_login, login_count আপডেট
+            cursor.execute("""
+                UPDATE users SET
+                    failed_login_attempts = 0,
+                    account_locked_until = NULL,
+                    last_login = %s,
+                    login_count = COALESCE(login_count, 0) + 1
+                WHERE id = %s
+            """, (datetime.now(), user['id']))
             conn.commit()
             access_token = create_access_token(identity=str(user['id']))
             refresh_token = create_refresh_token(cursor, conn, user['id'])
-            return jsonify({"token": access_token, "refresh_token": refresh_token}), 200
+            return jsonify({
+                "token": access_token,
+                "refresh_token": refresh_token,
+                "role": user.get('role', 'user')
+            }), 200
         else:
             new_attempts = (user.get('failed_login_attempts') or 0) + 1
             if new_attempts >= MAX_FAILED_ATTEMPTS:
@@ -371,10 +418,14 @@ def reset_password():
         if reset_row['expires_at'] < datetime.now():
             return jsonify({"message": "This reset link has expired. Please request a new one."}), 400
         hashed_pw = bcrypt.generate_password_hash(new_password).decode('utf-8')
-        cursor.execute(
-            "UPDATE users SET password = %s, failed_login_attempts = 0, account_locked_until = NULL WHERE id = %s",
-            (hashed_pw, reset_row['user_id'])
-        )
+        cursor.execute("""
+            UPDATE users SET
+                password = %s,
+                failed_login_attempts = 0,
+                account_locked_until = NULL,
+                password_changed_at = %s
+            WHERE id = %s
+        """, (hashed_pw, datetime.now(), reset_row['user_id']))
         cursor.execute("UPDATE password_reset_tokens SET used = 1 WHERE id = %s", (reset_row['id'],))
         cursor.execute("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = %s", (reset_row['user_id'],))
         conn.commit()
@@ -586,7 +637,6 @@ def send_alerts():
 
         subject = f"{len(new_jobs)} New Remote Jobs Found!"
         body = f"<h3>Hi there!</h3><p>We found {len(new_jobs)} new remote jobs:</p><ul>{job_list_html}</ul>"
-
         sent_count = sum(1 for u in users if send_email(u['email'], subject, body))
 
         job_ids = [job['id'] for job in new_jobs]
